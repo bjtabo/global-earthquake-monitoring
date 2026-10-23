@@ -22,15 +22,17 @@ flowchart LR
   cf -->|/api/* and /health, not cached<br/>VPC origin, HTTP 80| alb[Internal ALB<br/>regional WAF]
   alb --> t1[ECS task AZ a]
   alb --> t2[ECS task AZ b]
-  t1 --> rds[(RDS PostgreSQL 18<br/>primary + standby)]
-  t2 --> rds
+  t1 -->|read only, api_reader| rds[(RDS PostgreSQL 18<br/>primary + standby)]
+  t2 -->|read only, api_reader| rds
   sched[EventBridge Scheduler<br/>rate 5 min] --> ingest[Ingest Lambda]
   ingest -->|summary feeds, FDSN| usgs[(USGS)]
-  ingest --> rds
-  sched -.->|failed delivery| dlq[SQS DLQ]
+  ingest -->|upsert, ingest_writer| rds
+  migrate[Migrate Lambda<br/>CloudFormation custom resource] -->|schema and users, master user| rds
+  sched -.->|invoke failed after 2 retries| dlq[SQS DLQ]
   ingest -->|EMF| cw[CloudWatch<br/>metrics, SLOs, alarms]
   alb --> cw
   canary --> cw
+  dlq -->|queue depth| cw
   cw --> sns[SNS email]
 ```
 
