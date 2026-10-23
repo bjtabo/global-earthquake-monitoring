@@ -1,8 +1,6 @@
 # Game days
 
-Forcing two alarms with `aws cloudwatch set-alarm-state` proved that notifications reach the on-call email. It does not prove that a real failure moves the right metric, fires the right alarm and nothing else, or that the runbook leads to the fix. A game day proves those things by causing the failure on purpose, on a schedule, with people watching.
-
-Each game day below states a hypothesis, how to cause the failure, what should happen, how to confirm it, and how to undo it. Number 5 was run on 2026-10-23 against a deployed stack and its row reports what was measured. Numbers 1 to 4 are proposed; their expected times come from AWS documentation where it gives one and are estimates from the design otherwise.
+A game day causes a failure on purpose, on a schedule, with people watching. It checks three things: that the failure moves the metric we expect, that the right alarm fires and nothing else does, and that the runbook leads to the fix. Each game day below states a hypothesis, how to cause the failure, what should happen, how to confirm it, and how to undo it. Expected times come from AWS documentation where it gives one, and are estimates from the design otherwise.
 
 ## Ground rules
 
@@ -16,15 +14,15 @@ Commands assume the two setup lines from [runbooks/README.md](runbooks/README.md
 
 ## Summary
 
-| # | Game day | What it proves | Pages expected | Status |
-| --- | --- | --- | --- | --- |
-| 1 | An API task dies | Losing a task is invisible to users | No | Proposed |
-| 2 | A broken deploy | The circuit breaker rolls back a bad image without dropping traffic | No | Proposed |
-| 3 | USGS is down | The page keeps serving the last data, and the freshness SLO and alarms catch the outage | Yes, freshness | Proposed |
-| 4 | RDS fails over | Multi-AZ failover recovers without manual action, and the outage is visible, not hidden | Yes, availability | Proposed |
-| 5 | Rate limit with a spoofed IP | The WAF counts the IP CloudFront saw, so forged headers do not evade it | No | Run on 2026-10-23 |
+| # | Game day | What it proves | Pages expected |
+| --- | --- | --- | --- |
+| 1 | An API task dies | Losing a task is invisible to users | No |
+| 2 | A broken deploy | The circuit breaker rolls back a bad image without dropping traffic | No |
+| 3 | USGS is down | The page keeps serving the last data, and the freshness SLO and alarms catch the outage | Yes, freshness |
+| 4 | RDS fails over | Multi-AZ failover recovers without manual action, and the outage is visible, not hidden | Yes, availability |
+| 5 | Rate limit with a spoofed IP | The WAF counts the IP CloudFront saw, so forged headers do not evade it | No |
 
-They are ordered from lowest to highest impact. Number 5 goes last because it blocks the operator's IP for about 4 minutes.
+They are ordered from lowest to highest impact. Number 5 goes last because it blocks the operator's IP for a few minutes.
 
 ## 1. An API task dies
 
@@ -102,23 +100,20 @@ aws rds reboot-db-instance --db-instance-identifier "$(out DbInstanceId)" --forc
 
 **Pass** if service came back on its own within AWS's typical range, the alarm that fired named the availability runbook, and the budget spent was recorded.
 
-## 5. Rate limit with a spoofed IP (run on 2026-10-23)
+## 5. Rate limit with a spoofed IP
 
 **Hypothesis.** One client cannot pass 300 API requests in 5 minutes, even if it forges the headers that carry its IP.
 
 **Cause it.** A `curl` loop against `/health`, which is not cached and therefore always reaches the WAF, sending invented `x-viewer-ip` and `X-Forwarded-For` headers.
 
-**Expect.** The CloudFront Function overwrites `x-viewer-ip` with the address CloudFront saw, and the WAF rule counts that header, so forged headers do not change the count. Blocked requests get a 403, the WAF default.
+**Expect.** The CloudFront Function overwrites `x-viewer-ip` with the address CloudFront saw, and the WAF rule counts that header, so forged headers do not change the count. Once a client crosses 300 requests, it gets 403, the WAF default. AWS states that rate limiting is not exact and that detecting an excess usually takes under 30 seconds. The page at `/` keeps answering 200, because it is served from S3.
 
-**Measured.**
+**Confirm.** The `rate-limit-per-viewer` line in "WAF blocked requests per rule" rises, and the API log shows the real IP in `viewer_ip`. There are no 5xx and no page alarm, because a 403 does not count against the availability SLO.
 
-- The test ran from one IP at about 4.9 requests per second.
-- Request 300 went out at 61 s. The first 403 came on request 408, at 84 s, 23 s after crossing the limit. AWS states that rate limiting is not exact and that detecting an excess usually takes under 30 seconds.
-- With a forged `x-viewer-ip` the 403s continued. The page at `/` kept answering 200, because it is served from S3.
-- After the burst, a request every 15 s kept getting 403 until 200 returned at 260 s. The WAF recorded 47 blocks under the `rate-limit-per-viewer` metric, and the API log showed the real IP in `viewer_ip`.
+**Undo.** Stop the loop. The block lifts by itself once that IP falls back under the limit.
 
-**Pass.** Passed. No 5xx and no page alarm, because a 403 is not a bad request for the availability SLO.
+**Pass** if forged headers did not delay the block, the block lifted on its own, and no alarm fired.
 
 ## Not covered
 
-Losing a whole Availability Zone is the failure Multi-AZ exists for, and it is not on this list. AWS Fault Injection Service is not among the services of the AWS Free plan used for the test account. In a standard account it would be the sixth game day, run with FIS.
+Losing a whole Availability Zone is the failure Multi-AZ exists for. Simulating it needs AWS Fault Injection Service, which is not available on the AWS Free plan. In a standard account it would be the sixth game day.
