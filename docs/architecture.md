@@ -28,8 +28,8 @@ flowchart LR
   ingest -->|summary feeds, FDSN| usgs[(USGS)]
   ingest -->|upsert, ingest_writer| rds
   migrate[Migrate Lambda<br/>CloudFormation custom resource] -->|schema and users, master user| rds
-  sched -.->|invoke failed after 2 retries| dlq[SQS DLQ]
-  ingest -->|EMF| cw[CloudWatch<br/>metrics, SLOs, alarms]
+  sched -.->|Lambda could not be invoked<br/>not code errors| dlq[Scheduler DLQ<br/>SQS]
+  ingest -->|EMF, Errors metric| cw[CloudWatch<br/>metrics, SLOs, alarms]
   alb --> cw
   canary --> cw
   dlq -->|queue depth| cw
@@ -78,7 +78,7 @@ Each layer is a nested CloudFormation stack under one root stack: network, datab
 
 **Data path.**
 
-1. EventBridge Scheduler invokes the ingest Lambda every 5 minutes. Async retries are 0 and events older than 240 s are dropped, so runs never stack; Scheduler retries delivery twice within 240 s and sends what it cannot deliver to an SQS dead-letter queue.
+1. EventBridge Scheduler invokes the ingest Lambda every 5 minutes. Async retries are 0 and events older than 240 s are dropped, so runs never stack; Scheduler retries delivery twice within 240 s and sends what it cannot deliver to an SQS dead-letter queue. That queue belongs to the schedule, not to the function: it receives an event only when Scheduler cannot invoke the Lambda, for example a missing permission or a deleted function. An error inside the function code does not reach it; that shows up in the Lambda `Errors` metric and the `ticket-ingest-errors` alarm, and the next run 5 minutes later is the retry.
 2. The Lambda takes a PostgreSQL advisory lock; a second concurrent run returns `skipped`. Account concurrency is 10 in a new account and Lambda only lets you reserve down to 100 unreserved, so the lock, not reserved concurrency, guarantees one writer.
 3. It picks the smallest source that covers the gap since the last feed it loaded, with one hour of margin: `all_day` under 23 hours, `all_week` under 6 days 23 hours, `all_month` under 29 days 23 hours, otherwise the FDSN event service in 30-day windows. A window that returns the 20,000-row limit is split in half until it fits.
 4. Features without an id, times or valid coordinates are skipped and counted. URLs are kept only if they point to `https://earthquake.usgs.gov/`.
