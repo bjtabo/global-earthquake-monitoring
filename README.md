@@ -15,6 +15,7 @@ Ingests the USGS earthquake feeds every 5 minutes into PostgreSQL on AWS (us-eas
 - [docs/architecture.md](docs/architecture.md): design, security, failure modes, SLOs, alerting, error budget policy, cost.
 - [DEPLOY.md](DEPLOY.md): deploying into a new account and removing everything afterwards.
 - [docs/runbooks/](docs/runbooks/README.md): one runbook per alarm family; [docs/postmortem-template.md](docs/postmortem-template.md).
+- [docs/game-days.md](docs/game-days.md): the failure exercises, what each one proves and how to run it.
 
 ## Layout
 
