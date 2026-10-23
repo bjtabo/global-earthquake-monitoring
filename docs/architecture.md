@@ -238,7 +238,7 @@ The SRE book defines toil as work that is "manual, repetitive, automatable, tact
 | Set up a new account by hand | `ops/preflight.sh` checks tools, credentials, quotas and name collisions; `ops/deploy.sh` does the rest in one run and converges when rerun |
 | Load history | `deploy.sh` runs an idempotent 390-day backfill when history is short |
 | Recover a long ingestion gap | feed choice by lag; FDSN windows beyond 30 days |
-| Clean up and hunt for leaks | `ops/destroy.sh --purge` then `ops/audit.sh`, which exits 1 if anything is left |
+| Clean up and hunt for leaks | `ops/destroy.sh --region <region> --purge` then `ops/audit.sh --region <region>`, which exits 1 if anything is left |
 | Find manual changes | `ops/drift.sh` on the root and every nested stack |
 | Rotate or share the master password | RDS manages it; no human reads it |
 | Triage noisy alerts | multiwindow burn rates, so a spike that has stopped does not page; at canary-only traffic one 5xx still does (section 5) |
@@ -280,7 +280,7 @@ Hourly cost of the full stack in us-east-2, from the AWS Price List values gathe
 | S3 site bucket and CloudFront at this traffic | under 0.001 |
 | **Total** | **about 0.20** |
 
-Data transfer, NAT data processing, CloudWatch metrics and logs add cents at this traffic. `ops/destroy.sh --purge` removes every billable resource, and `ops/audit.sh` printing `audit clean` is the proof.
+Data transfer, NAT data processing, CloudWatch metrics and logs add cents at this traffic. `ops/destroy.sh --region <region> --purge` removes every billable resource, and `ops/audit.sh` printing `audit clean` is the proof.
 
 ## 12. Additional insights
 

@@ -53,7 +53,7 @@ aws ecs stop-task --cluster "$(out ClusterName)" --task "$TASK" --reason "game d
 
 **Confirm.** `aws ecs describe-services` shows `rolloutState` FAILED and a new deployment that comes from the rollback. The ALB shows zero 5xx for the whole attempt. [runbooks/deploy-rollback.md](runbooks/deploy-rollback.md) explains the events.
 
-**Undo.** The rollback is the undo. Deregister the broken revision so `ops/destroy.sh --purge` can remove it later.
+**Undo.** The rollback is the undo. Deregister the broken revision so `ops/destroy.sh --region "$AWS_REGION" --purge` can remove it later.
 
 **Pass** if the rollback happened on its own and no request failed.
 
