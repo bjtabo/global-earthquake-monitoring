@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Read-only checks before a deploy. Changes nothing.
 source "$(dirname "$0")/lib.sh"
+region_only "$@"
 
 need() { command -v "$1" >/dev/null || die "missing tool: $1"; }
 for t in aws docker git python3 curl; do need "$t"; done

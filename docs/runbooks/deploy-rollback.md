@@ -22,4 +22,4 @@ A `FAILED` deployment followed by a new one whose reason mentions a rollback mea
 
 ## Verify recovery
 
-One deployment, `COMPLETED`, 2 healthy targets, and `ops/drift.sh` reports `IN_SYNC` for the app stack.
+One deployment, `COMPLETED`, 2 healthy targets, and `ops/drift.sh --region "$AWS_REGION"` reports `IN_SYNC` for the app stack.

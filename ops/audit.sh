@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Lists anything left for $STACK. Exit 0 only when nothing is left.
 source "$(dirname "$0")/lib.sh"
+region_only "$@"
 
 LEFT=0
 ERR="$(mktemp)"
@@ -49,7 +50,8 @@ gone() { # region arn
 
 report stacks aws cloudformation list-stacks \
   --query "StackSummaries[?StackStatus!='DELETE_COMPLETE' && (StackName=='$STACK' || starts_with(StackName, '$STACK-'))].StackName" --output text
-for region in us-east-2 us-east-1; do
+# us-east-1 too: CloudFront and other global services keep their resources there.
+for region in $(printf '%s\n' "$AWS_REGION" us-east-1 | sort -u); do
   live="" stale=0
   arns="$(aws resourcegroupstaggingapi get-resources --region "$region" \
     --tag-filters Key=Project,Values="$STACK" --query 'ResourceTagMappingList[].ResourceARN' --output text)"

@@ -2,14 +2,16 @@
 # Deletes every stack for $STACK. --purge also removes the final snapshot and secrets now.
 source "$(dirname "$0")/lib.sh"
 
-PURGE=0
+PURGE=0 REGION=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --region) [[ $# -ge 2 ]] || die "--region needs a value"; REGION="$2"; shift 2 ;;
     --purge) PURGE=1; shift ;;
     --yes) YES=1; shift ;;
     *) die "unknown argument: $1" ;;
   esac
 done
+use_region "$REGION"
 confirm_account
 DB_ID="$STACK-db"
 
@@ -104,7 +106,7 @@ if [[ "$PURGE" == 1 ]]; then
     log "deleting log group $lg"
     aws logs delete-log-group --log-group-name "$lg"
   done
-  "$ROOT/ops/audit.sh"
+  "$ROOT/ops/audit.sh" --region "$AWS_REGION"
 else
   log "kept: final snapshot of $DB_ID and secrets in their recovery window; rerun with --purge to remove them"
 fi

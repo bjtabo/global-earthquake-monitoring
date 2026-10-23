@@ -27,7 +27,7 @@ aws sqs get-queue-attributes --queue-url "$DLQ" --attribute-names ApproximateNum
 | USGS returns 5xx or times out | Nothing to fix on our side. Post a status note, keep watching. When USGS is back, the next run picks the smallest feed that covers the gap (FDSN beyond 30 days). Per the error budget policy, a USGS outage does not freeze releases. |
 | Errors in the Lambda log after a deploy | Roll back that deploy: check out the previous commit and run `ops/deploy.sh`. |
 | `password authentication failed` or `connection failed` | [database.md](database.md) |
-| Schedule `DISABLED` | Someone changed it by hand. Enable it again in the EventBridge Scheduler console (`$STACK-ingest`), then `ops/drift.sh` should report `IN_SYNC`. A `deploy.sh` with no template changes does not undo it: the change set is empty. |
+| Schedule `DISABLED` | Someone changed it by hand. Enable it again in the EventBridge Scheduler console (`$STACK-ingest`), then `ops/drift.sh --region "$AWS_REGION"` should report `IN_SYNC`. A `deploy.sh` with no template changes does not undo it: the change set is empty. |
 | Messages in the DLQ | Fix the cause first. The messages only record missed runs; the next run catches up, so the queue can then be purged: `aws sqs purge-queue --queue-url "$DLQ"`. |
 
 Run one ingestion by hand, for example after a fix:

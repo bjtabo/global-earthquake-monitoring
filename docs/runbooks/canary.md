@@ -23,7 +23,7 @@ aws cloudfront get-distribution --id "$(out DistributionId)" --query 'Distributi
 | `curl` fails the same way | The site is down. Find the layer: `/health` 503 means the database ([database.md](database.md)); 502 or 504 means the ALB or tasks ([api-availability.md](api-availability.md)); a timeout or TLS error means CloudFront, so check the AWS Health Dashboard. |
 | `/` returns 403, the API answers | The page is missing from the site bucket (an upload that never ran or was interrupted). Rerun `ops/deploy.sh`: it syncs the page and invalidates CloudFront. |
 | `curl` works, the canary fails | The check itself is broken: a deprecated runtime, a changed response, or missing permissions. Read `Status.StateReason`, fix `infra/observability.yaml`, redeploy. |
-| Canary state is not `RUNNING` | Restart it with `aws synthetics start-canary --name "$(out CanaryName)"` and find out who stopped it (`ops/drift.sh`). |
+| Canary state is not `RUNNING` | Restart it with `aws synthetics start-canary --name "$(out CanaryName)"` and find out who stopped it (`ops/drift.sh --region "$AWS_REGION"`). |
 
 ## Verify recovery
 

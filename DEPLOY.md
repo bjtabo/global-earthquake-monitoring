@@ -1,6 +1,8 @@
 # Deploying into a new account
 
-Region is fixed to us-east-2; the stack name defaults to `quakes` (`STACK=<name>` in front of every `ops/` command picks another one: 3 to 14 lowercase letters, digits or single hyphens, starting with a letter and not ending in a hyphen).
+Every `ops/` script takes the region as `--region`, and it is required: nothing falls back to the region of a profile. The examples use `us-east-2`, the region the brief asks for and the only one this stack has been deployed and tested in. The scripts accept only regions where CloudFront VPC origins work in every Availability Zone (the list is in `ops/lib.sh`); other regions may still lack a service the stack uses.
+
+The stack name defaults to `quakes` (`STACK=<name>` in front of every `ops/` command picks another one: 3 to 14 lowercase letters, digits or single hyphens, starting with a letter and not ending in a hyphen).
 
 ## 1. Prerequisites
 
@@ -52,7 +54,7 @@ aws freetier get-account-plan-state --region us-east-1
 ## 3. Preflight
 
 ```bash
-ops/preflight.sh
+ops/preflight.sh --region us-east-2
 ```
 
 Read-only. It ends in `preflight ok`, or stops with a message when something would make the deploy fail:
@@ -61,15 +63,15 @@ Read-only. It ends in `preflight ok`, or stops with a message when something wou
 | --- | --- |
 | `missing tool`, `AWS CLI v2 required`, `python3 has no pip`, `Docker is not running` | install or start it |
 | `no usable AWS credentials` | the credentials above are not active in this shell |
-| `stack ... is <status>` | a stack from an earlier attempt is stuck or rolled back; run `ops/destroy.sh --purge` first |
+| `stack ... is <status>` | a stack from an earlier attempt is stuck or rolled back; run `ops/destroy.sh --region <region> --purge` first |
 | `VPCs` or `Elastic IPs: need N free` | the account is at its quota; the deploy needs 1 VPC and 2 Elastic IPs |
 | a DB instance, secrets, log groups or an ECR repository with the project's name already exist | an earlier deploy was not purged, or the name is taken; purge it or use another `STACK` |
 
 ## 4. Deploy
 
 ```bash
-ops/deploy.sh --email <address for alarms>              # standard account
-ops/deploy.sh --email <address for alarms> --free-plan  # AWS Free plan account
+ops/deploy.sh --region us-east-2 --email <address for alarms>              # standard account
+ops/deploy.sh --region us-east-2 --email <address for alarms> --free-plan  # AWS Free plan account
 ```
 
 It prints the account, region and caller, and asks you to type the account id. Nothing is created before that.
@@ -91,7 +93,7 @@ Take `Url` and `AlbDnsName` from the table, then:
 ```bash
 open <Url>
 BASE_URL=<Url> ALB_DNS=<AlbDnsName> .venv/bin/pytest -m e2e tests/e2e -v
-ops/drift.sh            # every stack IN_SYNC
+ops/drift.sh --region us-east-2      # every stack IN_SYNC
 ```
 
 CloudWatch console in us-east-2: the dashboard named after the stack, the three SLOs under **Service Level Objectives (SLO)** with their attainment and remaining error budget, the alarms with the stack prefix, and the canary `quakes-canary`.
@@ -99,7 +101,7 @@ CloudWatch console in us-east-2: the dashboard named after the stack, the three 
 ## 6. Teardown
 
 ```bash
-ops/destroy.sh --purge
+ops/destroy.sh --region us-east-2 --purge
 ```
 
 It asks for the account id again, turns off deletion protection on the database, deletes the root stack, empties and deletes the bootstrap stack, then removes the final database snapshot, the project's secrets without a recovery window, the deregistered task definitions and the canary log groups. It finishes by running `ops/audit.sh`, which must print `audit clean`. It takes about 35 minutes, most of it waiting for Lambda and CloudFront network interfaces to leave the VPC. After a teardown the tagging index keeps listing some deleted EC2 and ECS resources for a while; the audit asks those services directly and counts them in a `note:` line instead of reporting them as left.
@@ -110,6 +112,6 @@ Then remove the credentials: delete the access key or the IAM user, and the keys
 
 - `aws cloudformation deploy` stops waiting after 60 minutes; the script then waits again while the root stack is still in progress.
 - Rerun `ops/deploy.sh`: every step converges, the backfill only runs when history is short, and an image already in ECR is not rebuilt.
-- A root stack in `ROLLBACK_COMPLETE` cannot be updated: `ops/destroy.sh --purge`, then deploy again.
+- A root stack in `ROLLBACK_COMPLETE` cannot be updated: `ops/destroy.sh --region us-east-2 --purge`, then deploy again.
 - `ops/destroy.sh` retries a stack delete up to 3 times and waits for the VPC to drain between attempts. Lambda and CloudFront network interfaces can take several minutes to go away after their owners are deleted.
 - The stack events show the first failure: `aws cloudformation describe-stack-events --region us-east-2 --stack-name <stack> --query "StackEvents[?ResourceStatus=='CREATE_FAILED']"`.

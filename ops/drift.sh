@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Drift detection on the root stack and every nested stack. Exit 1 if anything drifted.
 source "$(dirname "$0")/lib.sh"
+region_only "$@"
 
 NESTED="$(aws cloudformation list-stack-resources --stack-name "$STACK" \
   --query "StackResourceSummaries[?ResourceType=='AWS::CloudFormation::Stack'].PhysicalResourceId" --output text)"

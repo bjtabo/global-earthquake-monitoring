@@ -2,9 +2,10 @@
 # Deploys or updates everything. Safe to rerun.
 source "$(dirname "$0")/lib.sh"
 
-EMAIL="" BUDGET=0 BACKUP_DAYS=7
+EMAIL="" BUDGET=0 BACKUP_DAYS=7 REGION=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --region) [[ $# -ge 2 ]] || die "--region needs a value"; REGION="$2"; shift 2 ;;
     --email) [[ $# -ge 2 ]] || die "--email needs a value"; EMAIL="$2"; shift 2 ;;
     --budget) [[ $# -ge 2 ]] || die "--budget needs a value"; BUDGET="$2"; shift 2 ;;
     --free-plan) BACKUP_DAYS=1; shift ;; # AWS Free plan accounts reject RDS backup retention above 1 day
@@ -13,10 +14,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 # Same pattern as the AlertEmail parameter, checked here so a typo fails before anything is built.
-[[ "$EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || die "usage: deploy.sh --email you@example.com [--budget USD] [--free-plan] [--yes]"
+[[ "$EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || die "usage: deploy.sh --region us-east-2 --email you@example.com [--budget USD] [--free-plan] [--yes]"
 [[ "$BUDGET" =~ ^[0-9]+$ ]] || die "--budget takes whole dollars"
+use_region "$REGION"
 
-"$ROOT/ops/preflight.sh"
+"$ROOT/ops/preflight.sh" --region "$AWS_REGION"
 confirm_account
 mkdir -p "$BUILD"
 

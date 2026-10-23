@@ -74,7 +74,7 @@ aws lambda update-function-configuration --function-name "$F" --environment file
 
 - `ticket-ingest-errors` after 15 minutes, when 3 of 3 five-minute periods have errors.
 - `page-freshness-fast-burn` when the first 10-minute period with lag over 600 s closes, 15 to 20 minutes after the cut. At that point the 10-minute burn rate is 100 and the 60-minute one is 16.7 (1 bad period in 6 against a 1% budget), both above 14.4.
-- `ops/drift.sh` reports the Lambda as MODIFIED for as long as the change lasts.
+- `ops/drift.sh --region "$AWS_REGION"` reports the Lambda as MODIFIED for as long as the change lasts.
 
 **Confirm.** "Data lag" climbs past 600 s, "Ingestion runs" shows success at 0, both alarms arrive by email naming [runbooks/data-freshness.md](runbooks/data-freshness.md), and the page shows the delayed-data notice instead of an error.
 

@@ -3,7 +3,7 @@
 One runbook per alarm family. Every alarm description names its file. Each runbook starts from the same two lines, which work in any account the stack was deployed to (the `date -v` flags are macOS; on Linux use `date -d '-30 min'`):
 
 ```bash
-export AWS_REGION=us-east-2 STACK=quakes
+export AWS_REGION=us-east-2 STACK=quakes   # the --region and STACK the stack was deployed with
 out() { aws cloudformation describe-stacks --stack-name "$STACK" --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
 ```
 
