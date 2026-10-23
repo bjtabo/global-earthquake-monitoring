@@ -1,20 +1,61 @@
 # Deploying into a new account
 
-Region is fixed to us-east-2; the stack name defaults to `quakes` (`STACK=<name>` picks another one: 3 to 14 lowercase letters, digits or single hyphens, starting with a letter and not ending in a hyphen).
+Region is fixed to us-east-2; the stack name defaults to `quakes` (`STACK=<name>` in front of every `ops/` command picks another one: 3 to 14 lowercase letters, digits or single hyphens, starting with a letter and not ending in a hyphen).
 
 ## 1. Prerequisites
 
-- AWS CLI v2, Docker running on the default socket or `DOCKER_HOST` (the deploy builds with its own Docker config, which drops any other Docker context), git, Python 3 with pip, curl, bash 4.4 or newer (macOS ships 3.2: `brew install bash`).
-- `git clone` this repository and `cd` into it.
-- Credentials for the target account in any standard way: `aws configure sso` and `AWS_PROFILE`, or environment variables. The deployer needs administrator-level access: the stacks create IAM roles, a VPC, RDS, ECS, an ALB, CloudFront, WAF, Lambda, Scheduler, Synthetics, SLOs and alarms.
+- AWS CLI v2, Docker running on the default socket or `DOCKER_HOST` (the deploy builds with its own Docker config, which drops any other Docker context), git, curl, bash 4.4 or newer (macOS ships 3.2: `brew install bash`), and Python 3 with pip.
+- The repository:
 
-## 2. Preflight
+```bash
+git clone https://github.com/bjtabo/global-earthquake-monitoring.git
+cd global-earthquake-monitoring
+```
+
+- A virtual environment for the end-to-end tests, with Python 3.14 (cfn-lint does not support 3.15 yet):
+
+```bash
+python3.14 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+```
+
+## 2. Credentials
+
+The deployer needs administrator-level access: the stacks create IAM roles, a VPC, RDS, ECS, an ALB, CloudFront, WAF, Lambda, Scheduler, Synthetics, SLOs and alarms.
+
+With an IAM user and access keys:
+
+1. IAM console, **Users**, **Create user**. No console access. **Attach policies directly**: `AdministratorAccess`.
+2. Open the user, **Security credentials**, **Create access key**, use case **Command Line Interface (CLI)**.
+3. Load the keys:
+
+```bash
+aws configure
+```
+
+It asks for the access key ID, the secret access key, the region (`us-east-2`) and the output format (`json`). IAM Identity Center works as well: `aws configure sso`, then `export AWS_PROFILE=<profile>`.
+
+Check that the shell points at the target account:
+
+```bash
+aws sts get-caller-identity
+```
+
+Check the account plan:
+
+```bash
+aws freetier get-account-plan-state --region us-east-1
+```
+
+`accountPlanType` `FREE` means the deploy needs `--free-plan`: the AWS Free plan rejects RDS backup retention above 1 day. `PAID` means no flag (7 days).
+
+## 3. Preflight
 
 ```bash
 ops/preflight.sh
 ```
 
-Read-only. It stops with a message when something would make the deploy fail:
+Read-only. It ends in `preflight ok`, or stops with a message when something would make the deploy fail:
 
 | Message | Meaning |
 | --- | --- |
@@ -24,36 +65,36 @@ Read-only. It stops with a message when something would make the deploy fail:
 | `VPCs` or `Elastic IPs: need N free` | the account is at its quota; the deploy needs 1 VPC and 2 Elastic IPs |
 | a DB instance, secrets, log groups or an ECR repository with the project's name already exist | an earlier deploy was not purged, or the name is taken; purge it or use another `STACK` |
 
-## 3. Deploy
+## 4. Deploy
 
 ```bash
-ops/deploy.sh --email <address for alarms>
+ops/deploy.sh --email <address for alarms>              # standard account
+ops/deploy.sh --email <address for alarms> --free-plan  # AWS Free plan account
 ```
 
 It prints the account, region and caller, and asks you to type the account id. Nothing is created before that.
 
-What it does, in order: bootstrap stack (artifacts bucket, image repository); Lambda packages; the API image, built for ARM and pushed to ECR; the root stack with all nested stacks; the page, uploaded to S3; a 390-day backfill from USGS; one ingestion run; then it waits until `/health` answers through CloudFront. Any failed step stops the script with a non-zero exit and the failing command's error, including a single failed backfill window. The last line is `URL: https://<distribution>.cloudfront.net`.
+What it does, in order: bootstrap stack (artifacts bucket, image repository); Lambda packages; the API image, built for ARM and pushed to ECR; the root stack with all nested stacks; the page, uploaded to S3; a 390-day backfill from USGS; one ingestion run; then it waits until `/health` answers through CloudFront. Any failed step stops the script with a non-zero exit and the failing command's error, including a single failed backfill window. It takes about 30 minutes, most of it the Multi-AZ database and the CloudFront VPC origin, which are created in parallel. The last line is `URL: https://<distribution>.cloudfront.net`.
 
-Timing measured in the owner's account on 2026-10-23, one run from an empty account: 30 minutes. Preflight, bootstrap stack, Lambda packages and the image took 1 minute; the network stack 3; then the database stack 18 (Multi-AZ RDS) while the ALB stack (2) and the edge stack (12: the CloudFront VPC origin, which AWS says can take up to 15 minutes to reach Deployed, then the distribution) ran alongside it; ingestion 5 and app 3 in parallel; observability 1; the page, the backfill and the health check 1. Plan for 30 to 35 minutes.
+Confirm the email from AWS Notifications (**Confirm subscription**), or alarms will not reach anyone. On a first deploy `<stack>-page-canary-failing` starts in ALARM, because a canary with no runs yet counts as failing, and returns to OK once the canary passes, usually within 10 to 20 minutes.
 
-Confirm the email from AWS Notifications, or alarms will not reach anyone. On a first deploy `<stack>-page-canary-failing` starts in ALARM, because a canary with no runs yet counts as failing, and returns to OK once the canary passes: after 20 minutes on 2026-10-22 and 10 minutes on 2026-10-23.
+`--budget <USD>` adds a monthly AWS Budgets alert to the same address.
 
-`--budget <USD>` adds a monthly AWS Budgets alert to the same address. `--free-plan` is only for accounts on the AWS Free plan, which rejects RDS backup retention above 1 day; leave it out in a standard account (7 days).
-
-## 4. While it runs
-
-- CloudFormation console: the root stack `quakes` and its nested stacks appearing in dependency order.
-- `docs/architecture.md`: the diagrams and the SLO section.
-
-## 5. After
+## 5. Check
 
 ```bash
-open "$(aws cloudformation describe-stacks --region us-east-2 --stack-name quakes --query "Stacks[0].Outputs[?OutputKey=='Url'].OutputValue" --output text)"
-BASE_URL=<URL> ALB_DNS=<AlbDnsName output> pytest -m e2e tests/e2e -v
+aws cloudformation describe-stacks --region us-east-2 --stack-name quakes --query "Stacks[0].Outputs" --output table
+```
+
+Take `Url` and `AlbDnsName` from the table, then:
+
+```bash
+open <Url>
+BASE_URL=<Url> ALB_DNS=<AlbDnsName> .venv/bin/pytest -m e2e tests/e2e -v
 ops/drift.sh            # every stack IN_SYNC
 ```
 
-CloudWatch: the dashboard named after the stack, the three SLOs under Application Signals, the alarms with the stack prefix, and the canary `quakes-canary`.
+CloudWatch console in us-east-2: the dashboard named after the stack, the three SLOs under **Service Level Objectives (SLO)** with their attainment and remaining error budget, the alarms with the stack prefix, and the canary `quakes-canary`.
 
 ## 6. Teardown
 
@@ -61,7 +102,9 @@ CloudWatch: the dashboard named after the stack, the three SLOs under Applicatio
 ops/destroy.sh --purge
 ```
 
-It turns off deletion protection on the database, deletes the root stack, empties and deletes the bootstrap stack, then removes the final database snapshot, the project's secrets without a recovery window, the deregistered task definitions and the canary log groups. It finishes by running `ops/audit.sh`, which must print `audit clean`. The full teardown took 37 minutes on 2026-10-22 and 34 minutes on 2026-10-23 in the owner's account. After a teardown the tagging index keeps listing some deleted EC2 and ECS resources for a while; the audit asks those services directly and counts them in a `note:` line instead of reporting them as left.
+It asks for the account id again, turns off deletion protection on the database, deletes the root stack, empties and deletes the bootstrap stack, then removes the final database snapshot, the project's secrets without a recovery window, the deregistered task definitions and the canary log groups. It finishes by running `ops/audit.sh`, which must print `audit clean`. It takes about 35 minutes, most of it waiting for Lambda and CloudFront network interfaces to leave the VPC. After a teardown the tagging index keeps listing some deleted EC2 and ECS resources for a while; the audit asks those services directly and counts them in a `note:` line instead of reporting them as left.
+
+Then remove the credentials: delete the access key or the IAM user, and the keys from `~/.aws/credentials` (`aws sso logout` with IAM Identity Center).
 
 ## 7. If something fails
 
