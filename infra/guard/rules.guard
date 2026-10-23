@@ -1,0 +1,59 @@
+let s3_buckets = Resources.*[ Type == 'AWS::S3::Bucket' ]
+rule s3_private_and_encrypted when %s3_buckets !empty {
+    %s3_buckets.Properties.BucketEncryption exists
+    %s3_buckets.Properties.PublicAccessBlockConfiguration.BlockPublicAcls == true
+    %s3_buckets.Properties.PublicAccessBlockConfiguration.BlockPublicPolicy == true
+    %s3_buckets.Properties.PublicAccessBlockConfiguration.IgnorePublicAcls == true
+    %s3_buckets.Properties.PublicAccessBlockConfiguration.RestrictPublicBuckets == true
+}
+
+let db_instances = Resources.*[ Type == 'AWS::RDS::DBInstance' ]
+rule rds_private_and_encrypted when %db_instances !empty {
+    %db_instances.Properties.StorageEncrypted == true
+    %db_instances.Properties.PubliclyAccessible == false
+}
+
+let sg_ingress = Resources.*[
+    Type == 'AWS::EC2::SecurityGroup'
+    Properties.SecurityGroupIngress exists
+].Properties.SecurityGroupIngress[*]
+rule no_ingress_from_internet when %sg_ingress !empty {
+    %sg_ingress {
+        when CidrIp exists { CidrIp != '0.0.0.0/0' }
+        when CidrIpv6 exists { CidrIpv6 != '::/0' }
+    }
+}
+
+let standalone_ingress = Resources.*[ Type == 'AWS::EC2::SecurityGroupIngress' ].Properties
+rule no_standalone_ingress_from_internet when %standalone_ingress !empty {
+    %standalone_ingress {
+        when CidrIp exists { CidrIp != '0.0.0.0/0' }
+        when CidrIpv6 exists { CidrIpv6 != '::/0' }
+    }
+}
+
+let inline_statements = Resources.*[
+    Type == 'AWS::IAM::Role'
+    Properties.Policies exists
+].Properties.Policies[*].PolicyDocument.Statement[ Effect == 'Allow' ]
+let managed_statements = Resources.*[ Type == 'AWS::IAM::ManagedPolicy' ].Properties.PolicyDocument.Statement[ Effect == 'Allow' ]
+rule iam_no_wildcard_action when %inline_statements !empty or %managed_statements !empty {
+    %inline_statements[*] {
+        when Action is_string { Action != '*' }
+        when Action is_list { Action[*] != '*' }
+    }
+    %managed_statements[*] {
+        when Action is_string { Action != '*' }
+        when Action is_list { Action[*] != '*' }
+    }
+}
+
+let log_groups = Resources.*[ Type == 'AWS::Logs::LogGroup' ]
+rule log_groups_expire when %log_groups !empty {
+    %log_groups.Properties.RetentionInDays exists
+}
+
+let functions = Resources.*[ Type == 'AWS::Lambda::Function' ]
+rule lambdas_in_vpc when %functions !empty {
+    %functions.Properties.VpcConfig exists
+}

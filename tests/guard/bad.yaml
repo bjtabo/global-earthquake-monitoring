@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  OpenBucket:
+    Type: AWS::S3::Bucket
+  PublicDb:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      StorageEncrypted: false
+      PubliclyAccessible: true
+  OpenSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: open
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+  AdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {}
+      Policies:
+        - PolicyName: admin
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"
+  ForeverLogs:
+    Type: AWS::Logs::LogGroup
+  PublicFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.14
+  StarManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: [logs:PutLogEvents, "*"]
+            Resource: "*"
+  BareRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {}
+  PlainSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: no ingress
+  OpenIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: sg-0123456789abcdef0
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0

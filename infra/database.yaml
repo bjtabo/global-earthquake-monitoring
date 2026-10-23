@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: PostgreSQL 18 on RDS. Multi-AZ, encrypted, TLS required, master password managed by RDS, passwords for the two application users.
+
+Parameters:
+  StackPrefix:
+    Type: String
+  DataSubnetIds:
+    Type: CommaDelimitedList
+  DbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  MultiAz:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  DeletionProtection:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+
+Resources:
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Isolated data subnets
+      SubnetIds: !Ref DataSubnetIds
+
+  DbParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: postgres18
+      Description: TLS required, statements slower than 500 ms logged
+      Parameters:
+        rds.force_ssl: "1"
+        log_min_duration_statement: "500"
+
+  DbLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/rds/instance/${StackPrefix}-db/postgresql
+      RetentionInDays: 7
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DependsOn: DbLogGroup
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub ${StackPrefix}-db
+      Engine: postgres
+      EngineVersion: "18.6"
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      MultiAZ: !Ref MultiAz
+      DBName: quakes
+      MasterUsername: quakes_admin
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      DBParameterGroupName: !Ref DbParameterGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroupId]
+      PubliclyAccessible: false
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      CopyTagsToSnapshot: true
+      DeletionProtection: !Ref DeletionProtection
+      AutoMinorVersionUpgrade: true
+      EnableCloudwatchLogsExports: [postgresql]
+
+  ApiReaderSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${StackPrefix}/db/api_reader
+      Description: Password of the read-only database user used by the API
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "api_reader"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  IngestWriterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${StackPrefix}/db/ingest_writer
+      Description: Password of the database user used by the ingestion Lambda
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "ingest_writer"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+Outputs:
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DbInstanceId:
+    Value: !Ref Database
+  MasterSecretArn:
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
+  ApiReaderSecretArn:
+    Value: !Ref ApiReaderSecret
+  IngestWriterSecretArn:
+    Value: !Ref IngestWriterSecret

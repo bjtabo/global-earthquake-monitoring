@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Earthquake monitor</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Earthquake monitor</h1>
+    <p id="freshness" role="status">Loading data from USGS…</p>
+  </header>
+  <main>
+    <section aria-labelledby="significant-title">
+      <h2 id="significant-title">Magnitude above 4.0, last 24 hours</h2>
+      <p class="state" id="significant-state">Loading…</p>
+      <table id="significant" hidden>
+        <thead><tr><th scope="col">Time (UTC)</th><th scope="col">Magnitude</th><th scope="col">Place</th><th scope="col">Depth (km)</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section aria-labelledby="daily-title">
+      <h2 id="daily-title">Earthquakes per day, last 7 complete days (UTC)</h2>
+      <p class="state" id="daily-state">Loading…</p>
+      <p id="daily-average" hidden></p>
+      <table id="daily" hidden>
+        <thead><tr><th scope="col">Day</th><th scope="col">Earthquakes</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section aria-labelledby="search-title">
+      <h2 id="search-title">Search</h2>
+      <form id="search-form">
+        <label>From <input type="date" name="start"></label>
+        <label>To <input type="date" name="end"></label>
+        <label>Minimum magnitude <input type="number" name="min_mag" step="0.1" min="-2" max="10"></label>
+        <label>Results <input type="number" name="limit" value="5" min="1" max="100" required></label>
+        <button type="submit">Search</button>
+      </form>
+      <p class="hint">Empty dates search the last 30 days.</p>
+      <p class="state" id="search-state">Loading…</p>
+      <table id="search" hidden>
+        <thead><tr><th scope="col">Time (UTC)</th><th scope="col">Magnitude</th><th scope="col">Place</th><th scope="col">Depth (km)</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+  <footer>
+    <p>Data from the <a href="https://earthquake.usgs.gov/">USGS Earthquake Hazards Program</a>. Quarry blasts and explosions are excluded.</p>
+  </footer>
+</body>
+</html>

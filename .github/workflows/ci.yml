@@ -1,0 +1,33 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements-dev.txt
+      - name: Install cfn-guard 3.2.1
+        run: |
+          curl -fsSL -o guard.tar.gz https://github.com/aws-cloudformation/cloudformation-guard/releases/download/3.2.1/cfn-guard-v3-x86_64-ubuntu-latest.tar.gz
+          echo "09c2b8cfd81d513374a8da89d4805dc55006a3da52bbf598e272022d4d198e94  guard.tar.gz" | sha256sum -c -
+          tar -xzf guard.tar.gz && sudo install cfn-guard-v3-x86_64-ubuntu-latest/cfn-guard /usr/local/bin/cfn-guard
+      - run: ops/lint.sh
+      - run: pytest -q

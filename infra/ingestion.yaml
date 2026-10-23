@@ -1,0 +1,244 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Ingestion. Migration Lambda, ingestion Lambda on a 5-minute schedule, dead-letter queue for failed deliveries.
+
+Parameters:
+  StackPrefix:
+    Type: String
+  AppSubnetIds:
+    Type: CommaDelimitedList
+  LambdaSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  DbEndpoint:
+    Type: String
+  MasterSecretArn:
+    Type: String
+  ApiReaderSecretArn:
+    Type: String
+  IngestWriterSecretArn:
+    Type: String
+  ArtifactsBucket:
+    Type: String
+  MigrateCodeKey:
+    Type: String
+  IngestCodeKey:
+    Type: String
+  UsgsBaseUrl:
+    Type: String
+    Default: https://earthquake.usgs.gov
+    AllowedPattern: ^https://.+
+
+Resources:
+  MigrateLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /${StackPrefix}/lambda/migrate
+      RetentionInDays: 7
+  IngestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /${StackPrefix}/lambda/ingest
+      RetentionInDays: 7
+
+  LambdaVpcAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: ENI management for VPC Lambdas, usable by the Lambda service only
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Same actions as AWSLambdaVPCAccessExecutionRole; the Describe calls have no resource-level scope.
+          - Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeSubnets
+              - ec2:DeleteNetworkInterface
+              - ec2:AssignPrivateIpAddresses
+              - ec2:UnassignPrivateIpAddresses
+            Resource: "*"
+          - Effect: Deny
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DeleteNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeSubnets
+              - ec2:DetachNetworkInterface
+              - ec2:AssignPrivateIpAddresses
+              - ec2:UnassignPrivateIpAddresses
+            Resource: "*"
+            Condition:
+              ArnLike:
+                lambda:SourceFunctionArn: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:*
+
+  MigrateRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [!Ref LambdaVpcAccessPolicy]
+      Policies:
+        - PolicyName: logs-and-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt MigrateLogGroup.Arn
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: [!Ref MasterSecretArn, !Ref ApiReaderSecretArn, !Ref IngestWriterSecretArn]
+
+  IngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns: [!Ref LambdaVpcAccessPolicy]
+      Policies:
+        - PolicyName: logs-and-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt IngestLogGroup.Arn
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref IngestWriterSecretArn
+
+  MigrateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Creates the schema and the application database users
+      Runtime: python3.14
+      Architectures: [arm64]
+      Handler: migrate.handler
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Ref MigrateCodeKey
+      Role: !GetAtt MigrateRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      LoggingConfig:
+        LogGroup: !Ref MigrateLogGroup
+      VpcConfig:
+        SubnetIds: !Ref AppSubnetIds
+        SecurityGroupIds: [!Ref LambdaSecurityGroupId]
+      Environment:
+        Variables:
+          DB_HOST: !Ref DbEndpoint
+          DB_NAME: quakes
+          MASTER_SECRET_ARN: !Ref MasterSecretArn
+          API_READER_SECRET_ARN: !Ref ApiReaderSecretArn
+          INGEST_WRITER_SECRET_ARN: !Ref IngestWriterSecretArn
+
+  # Runs the migration inside the stack operation, so nothing below runs against an unmigrated database.
+  # CodeKey changes with the migration code, which makes CloudFormation send an Update and run it again.
+  Migration:
+    Type: Custom::Migration
+    Properties:
+      ServiceToken: !GetAtt MigrateFunction.Arn
+      ServiceTimeout: "300"
+      CodeKey: !Ref MigrateCodeKey
+
+  IngestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Upserts USGS earthquakes into PostgreSQL
+      Runtime: python3.14
+      Architectures: [arm64]
+      Handler: ingest.handler
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Ref IngestCodeKey
+      Role: !GetAtt IngestRole.Arn
+      Timeout: 180
+      MemorySize: 512
+      LoggingConfig:
+        LogGroup: !Ref IngestLogGroup
+      VpcConfig:
+        SubnetIds: !Ref AppSubnetIds
+        SecurityGroupIds: [!Ref LambdaSecurityGroupId]
+      Environment:
+        Variables:
+          DB_HOST: !Ref DbEndpoint
+          DB_NAME: quakes
+          WRITER_SECRET_ARN: !Ref IngestWriterSecretArn
+          USGS_BASE_URL: !Ref UsgsBaseUrl
+          METRICS_NAMESPACE: !Sub ${StackPrefix}/Ingest
+
+  # The next scheduled run is the retry; a late event would overlap it.
+  IngestAsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref IngestFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 0
+      MaximumEventAgeInSeconds: 240
+
+  ScheduleDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      SqsManagedSseEnabled: true
+      MessageRetentionPeriod: 1209600
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: scheduler.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: {aws:SourceAccount: !Ref AWS::AccountId}
+      Policies:
+        - PolicyName: invoke-ingest
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt IngestFunction.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt ScheduleDeadLetterQueue.Arn
+
+  IngestSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: Migration
+    Properties:
+      Name: !Sub ${StackPrefix}-ingest
+      Description: Runs the ingestion Lambda every 5 minutes
+      ScheduleExpression: rate(5 minutes)
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt IngestFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"mode": "scheduled"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 2
+          MaximumEventAgeInSeconds: 240
+        DeadLetterConfig:
+          Arn: !GetAtt ScheduleDeadLetterQueue.Arn
+
+Outputs:
+  MigrateFunctionName:
+    Value: !Ref MigrateFunction
+  IngestFunctionName:
+    Value: !Ref IngestFunction
+  ScheduleDeadLetterQueueName:
+    Value: !GetAtt ScheduleDeadLetterQueue.QueueName
+  IngestLogGroupName:
+    Value: !Ref IngestLogGroup

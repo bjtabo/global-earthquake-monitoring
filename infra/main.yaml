@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Global earthquake monitor. Root stack; every layer is a nested stack.
+
+# Local TemplateURLs are rewritten by `aws cloudformation package` in ops/deploy.sh.
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks: [W3002]
+
+Parameters:
+  CloudFrontPrefixListId:
+    Type: String
+    AllowedPattern: ^pl-[0-9a-f]+$
+  MultiAz:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  DeletionProtection:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  BackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+  ArtifactsBucket:
+    Type: String
+  MigrateCodeKey:
+    Type: String
+  IngestCodeKey:
+    Type: String
+  UsgsBaseUrl:
+    Type: String
+    Default: https://earthquake.usgs.gov
+  ImageUri:
+    Type: String
+  ImageRepositoryName:
+    Type: String
+  AlertEmail:
+    Type: String
+    AllowedPattern: ^[^@\s]+@[^@\s]+$
+  MonthlyBudgetUsd:
+    Type: String
+    Default: "0"
+
+Resources:
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: network.yaml
+      Parameters:
+        StackPrefix: !Ref AWS::StackName
+        CloudFrontPrefixListId: !Ref CloudFrontPrefixListId
+
+  Alb:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: alb.yaml
+      Parameters:
+        StackPrefix: !Ref AWS::StackName
+        VpcId: !GetAtt Network.Outputs.VpcId
+        AppSubnetIds: !GetAtt Network.Outputs.AppSubnetIds
+        AlbSecurityGroupId: !GetAtt Network.Outputs.AlbSecurityGroupId
+
+  Database:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: database.yaml
+      Parameters:
+        StackPrefix: !Ref AWS::StackName
+        DataSubnetIds: !GetAtt Network.Outputs.DataSubnetIds
+        DbSecurityGroupId: !GetAtt Network.Outputs.DbSecurityGroupId
+        MultiAz: !Ref MultiAz
+        DeletionProtection: !Ref DeletionProtection
+        BackupRetentionDays: !Ref BackupRetentionDays
+
+  Ingestion:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ingestion.yaml
+      Parameters:
+        StackPrefix: !Ref AWS::StackName
+        AppSubnetIds: !GetAtt Network.Outputs.AppSubnetIds
+        LambdaSecurityGroupId: !GetAtt Network.Outputs.LambdaSecurityGroupId
+        DbEndpoint: !GetAtt Database.Outputs.DbEndpoint
+        MasterSecretArn: !GetAtt Database.Outputs.MasterSecretArn
+        ApiReaderSecretArn: !GetAtt Database.Outputs.ApiReaderSecretArn
+        IngestWriterSecretArn: !GetAtt Database.Outputs.IngestWriterSecretArn
+        ArtifactsBucket: !Ref ArtifactsBucket
+        MigrateCodeKey: !Ref MigrateCodeKey
+        IngestCodeKey: !Ref IngestCodeKey
+        UsgsBaseUrl: !Ref UsgsBaseUrl
+
+  App:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: app.yaml
+      Parameters:
+        StackPrefix: !Ref AWS::StackName
+        AppSubnetIds: !GetAtt Network.Outputs.AppSubnetIds
+        AppSecurityGroupId: !GetAtt Network.Outputs.AppSecurityGroupId
+        DbEndpoint: !GetAtt Database.Outputs.DbEndpoint
+        ApiReaderSecretArn: !GetAtt Database.Outputs.ApiReaderSecretArn
+        ImageUri: !Ref ImageUri
+        ImageRepositoryName: !Ref ImageRepositoryName
+        TargetGroupArn: !GetAtt Alb.Outputs.TargetGroupArn
+        AlbFullName: !GetAtt Alb.Outputs.AlbFullName
+        TargetGroupFullName: !GetAtt Alb.Outputs.TargetGroupFullName
+
+  Edge:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: edge.yaml
+      Parameters:
+        StackPrefix: !Ref AWS::StackName
+        AlbArn: !GetAtt Alb.Outputs.AlbArn
+        AlbDnsName: !GetAtt Alb.Outputs.AlbDnsName
+
+  Observability:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: observability.yaml
+      Parameters:
+        StackPrefix: !Ref AWS::StackName
+        AlertEmail: !Ref AlertEmail
+        AlbFullName: !GetAtt Alb.Outputs.AlbFullName
+        TargetGroupFullName: !GetAtt Alb.Outputs.TargetGroupFullName
+        IngestFunctionName: !GetAtt Ingestion.Outputs.IngestFunctionName
+        ScheduleDeadLetterQueueName: !GetAtt Ingestion.Outputs.ScheduleDeadLetterQueueName
+        DbInstanceId: !GetAtt Database.Outputs.DbInstanceId
+        ClusterName: !GetAtt App.Outputs.ClusterName
+        ServiceName: !GetAtt App.Outputs.ServiceName
+        DistributionDomainName: !GetAtt Edge.Outputs.DistributionDomainName
+        ArtifactsBucket: !Ref ArtifactsBucket
+        MonthlyBudgetUsd: !Ref MonthlyBudgetUsd
+
+Outputs:
+  VpcId:
+    Value: !GetAtt Network.Outputs.VpcId
+  DbInstanceId:
+    Value: !GetAtt Database.Outputs.DbInstanceId
+  MigrateFunctionName:
+    Value: !GetAtt Ingestion.Outputs.MigrateFunctionName
+  IngestFunctionName:
+    Value: !GetAtt Ingestion.Outputs.IngestFunctionName
+  ClusterName:
+    Value: !GetAtt App.Outputs.ClusterName
+  ServiceName:
+    Value: !GetAtt App.Outputs.ServiceName
+  AlbDnsName:
+    Value: !GetAtt Alb.Outputs.AlbDnsName
+  Url:
+    Value: !Sub https://${Edge.Outputs.DistributionDomainName}
+  DistributionId:
+    Value: !GetAtt Edge.Outputs.DistributionId
+  SiteBucketName:
+    Value: !GetAtt Edge.Outputs.SiteBucketName
+  AlertTopicArn:
+    Value: !GetAtt Observability.Outputs.AlertTopicArn
+  CanaryName:
+    Value: !GetAtt Observability.Outputs.CanaryName
+  DashboardName:
+    Value: !GetAtt Observability.Outputs.DashboardName

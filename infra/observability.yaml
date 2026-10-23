@@ -1,0 +1,819 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Observability. Alert topic, SLOs, burn-rate alarms, operational alarms, canary, dashboard and budget.
+
+Parameters:
+  StackPrefix:
+    Type: String
+  AlertEmail:
+    Type: String
+    AllowedPattern: ^[^@\s]+@[^@\s]+$
+  AlbFullName:
+    Type: String
+  TargetGroupFullName:
+    Type: String
+  IngestFunctionName:
+    Type: String
+  ScheduleDeadLetterQueueName:
+    Type: String
+  DbInstanceId:
+    Type: String
+  ClusterName:
+    Type: String
+  ServiceName:
+    Type: String
+  DistributionDomainName:
+    Type: String
+  ArtifactsBucket:
+    Type: String
+  CanaryRuntime:
+    Type: String
+    Default: syn-nodejs-puppeteer-18.0
+  MonthlyBudgetUsd:
+    Type: String
+    Default: "0"
+    AllowedPattern: ^[0-9]+$
+
+Conditions:
+  WantsBudget: !Not [!Equals [!Ref MonthlyBudgetUsd, "0"]]
+
+Resources:
+  # Unencrypted: alarm payloads carry no data, and CloudWatch cannot publish to a topic under the AWS managed SNS key.
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${StackPrefix}-alerts
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref AlertTopic]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CloudWatchAlarmsInThisAccount
+            Effect: Allow
+            Principal: {Service: cloudwatch.amazonaws.com}
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals: {aws:SourceAccount: !Ref AWS::AccountId}
+              ArnLike: {aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*"}
+
+  AvailabilitySlo:
+    Type: AWS::ApplicationSignals::ServiceLevelObjective
+    Properties:
+      Name: !Sub ${StackPrefix}-api-availability
+      Description: Share of requests reaching the ALB that did not end in a 5xx from a task or from the load balancer
+      RequestBasedSli:
+        RequestBasedSliMetric:
+          TotalRequestCountMetric:
+            - Id: requests
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/ApplicationELB
+                  MetricName: RequestCount
+                  Dimensions: [{Name: LoadBalancer, Value: !Ref AlbFullName}]
+                Period: 60
+                Stat: Sum
+            - Id: elbtotal
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/ApplicationELB
+                  MetricName: HTTPCode_ELB_5XX_Count
+                  Dimensions: [{Name: LoadBalancer, Value: !Ref AlbFullName}]
+                Period: 60
+                Stat: Sum
+            - Id: total
+              ReturnData: true
+              Expression: FILL(requests, 0) + FILL(elbtotal, 0)
+          MonitoredRequestCountMetric:
+            BadCountMetric:
+              - Id: target5xx
+                ReturnData: false
+                MetricStat:
+                  Metric:
+                    Namespace: AWS/ApplicationELB
+                    MetricName: HTTPCode_Target_5XX_Count
+                    Dimensions: [{Name: LoadBalancer, Value: !Ref AlbFullName}]
+                  Period: 60
+                  Stat: Sum
+              - Id: elb5xx
+                ReturnData: false
+                MetricStat:
+                  Metric:
+                    Namespace: AWS/ApplicationELB
+                    MetricName: HTTPCode_ELB_5XX_Count
+                    Dimensions: [{Name: LoadBalancer, Value: !Ref AlbFullName}]
+                  Period: 60
+                  Stat: Sum
+              - Id: bad
+                ReturnData: true
+                Expression: FILL(target5xx, 0) + FILL(elb5xx, 0)
+      Goal:
+        Interval:
+          RollingInterval: {Duration: 30, DurationUnit: DAY}
+        AttainmentGoal: 99.9
+      BurnRateConfigurations:
+        - LookBackWindowMinutes: 5
+        - LookBackWindowMinutes: 30
+        - LookBackWindowMinutes: 60
+        - LookBackWindowMinutes: 360
+        - LookBackWindowMinutes: 4320
+
+  LatencySlo:
+    Type: AWS::ApplicationSignals::ServiceLevelObjective
+    Properties:
+      Name: !Sub ${StackPrefix}-api-latency
+      Description: Minutes in which the p95 time the tasks took to answer the ALB stayed at or under 300 ms
+      Sli:
+        SliMetric:
+          MetricDataQueries:
+            - Id: p95
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: AWS/ApplicationELB
+                  MetricName: TargetResponseTime
+                  Dimensions: [{Name: LoadBalancer, Value: !Ref AlbFullName}]
+                Period: 60
+                Stat: p95
+            - Id: latency
+              ReturnData: true
+              Expression: FILL(p95, 0)
+        MetricThreshold: 0.3
+        ComparisonOperator: LessThanOrEqualTo
+      Goal:
+        Interval:
+          RollingInterval: {Duration: 30, DurationUnit: DAY}
+        AttainmentGoal: 99
+      BurnRateConfigurations:
+        - LookBackWindowMinutes: 5
+        - LookBackWindowMinutes: 30
+        - LookBackWindowMinutes: 60
+        - LookBackWindowMinutes: 360
+        - LookBackWindowMinutes: 4320
+
+  FreshnessSlo:
+    Type: AWS::ApplicationSignals::ServiceLevelObjective
+    Properties:
+      Name: !Sub ${StackPrefix}-data-freshness
+      Description: 10-minute periods in which the newest USGS data we served was at most 10 minutes old
+      Sli:
+        SliMetric:
+          MetricDataQueries:
+            - Id: lag
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  Namespace: !Sub ${StackPrefix}/Ingest
+                  MetricName: DataLagSeconds
+                  Dimensions: [{Name: Service, Value: ingest}]
+                Period: 600
+                Stat: Maximum
+            - Id: freshness
+              ReturnData: true
+              Expression: FILL(lag, 86400)
+        MetricThreshold: 600
+        ComparisonOperator: LessThanOrEqualTo
+      Goal:
+        Interval:
+          RollingInterval: {Duration: 30, DurationUnit: DAY}
+        AttainmentGoal: 99
+      BurnRateConfigurations:
+        - LookBackWindowMinutes: 10
+        - LookBackWindowMinutes: 30
+        - LookBackWindowMinutes: 60
+        - LookBackWindowMinutes: 360
+        - LookBackWindowMinutes: 4320
+
+  AvailabilityFastBurnAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: AvailabilitySlo
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-page-availability-fast-burn
+      AlarmDescription: >-
+        PAGE. API availability is spending its 30-day error budget 14.4 times too fast (2% of the budget in an hour).
+        Runbook: docs/runbooks/api-availability.md
+      Metrics:
+        - Id: long
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-availability"}
+                - {Name: BurnRateWindowMinutes, Value: "60"}
+            Period: 60
+            Stat: Maximum
+        - Id: short
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-availability"}
+                - {Name: BurnRateWindowMinutes, Value: "5"}
+            Period: 60
+            Stat: Maximum
+        - Id: both
+          ReturnData: true
+          Expression: MIN([long, short])
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 14.4
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  AvailabilitySlowBurnAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: AvailabilitySlo
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-page-availability-slow-burn
+      AlarmDescription: >-
+        PAGE. API availability is spending its 30-day error budget 6 times too fast (5% of the budget in 6 hours).
+        Runbook: docs/runbooks/api-availability.md
+      Metrics:
+        - Id: long
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-availability"}
+                - {Name: BurnRateWindowMinutes, Value: "360"}
+            Period: 60
+            Stat: Maximum
+        - Id: short
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-availability"}
+                - {Name: BurnRateWindowMinutes, Value: "30"}
+            Period: 60
+            Stat: Maximum
+        - Id: both
+          ReturnData: true
+          Expression: MIN([long, short])
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 6
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  AvailabilityBudgetBurnAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: AvailabilitySlo
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-ticket-availability-budget-burn
+      AlarmDescription: >-
+        TICKET. API availability has spent its 30-day error budget at or above the sustainable rate for 3 days (10% of the budget).
+        Runbook: docs/runbooks/api-availability.md
+      Metrics:
+        - Id: long
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-availability"}
+                - {Name: BurnRateWindowMinutes, Value: "4320"}
+            Period: 60
+            Stat: Maximum
+        - Id: short
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-availability"}
+                - {Name: BurnRateWindowMinutes, Value: "360"}
+            Period: 60
+            Stat: Maximum
+        - Id: both
+          ReturnData: true
+          Expression: MIN([long, short])
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  LatencyFastBurnAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: LatencySlo
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-page-latency-fast-burn
+      AlarmDescription: >-
+        PAGE. API latency is spending its 30-day error budget 14.4 times too fast (2% of the budget in an hour).
+        Runbook: docs/runbooks/api-latency.md
+      Metrics:
+        - Id: long
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-latency"}
+                - {Name: BurnRateWindowMinutes, Value: "60"}
+            Period: 60
+            Stat: Maximum
+        - Id: short
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-latency"}
+                - {Name: BurnRateWindowMinutes, Value: "5"}
+            Period: 60
+            Stat: Maximum
+        - Id: both
+          ReturnData: true
+          Expression: MIN([long, short])
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 14.4
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  LatencySlowBurnAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: LatencySlo
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-page-latency-slow-burn
+      AlarmDescription: >-
+        PAGE. API latency is spending its 30-day error budget 6 times too fast (5% of the budget in 6 hours).
+        Runbook: docs/runbooks/api-latency.md
+      Metrics:
+        - Id: long
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-latency"}
+                - {Name: BurnRateWindowMinutes, Value: "360"}
+            Period: 60
+            Stat: Maximum
+        - Id: short
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-latency"}
+                - {Name: BurnRateWindowMinutes, Value: "30"}
+            Period: 60
+            Stat: Maximum
+        - Id: both
+          ReturnData: true
+          Expression: MIN([long, short])
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 6
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  LatencyBudgetBurnAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: LatencySlo
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-ticket-latency-budget-burn
+      AlarmDescription: >-
+        TICKET. API latency has spent its 30-day error budget at or above the sustainable rate for 3 days (10% of the budget).
+        Runbook: docs/runbooks/api-latency.md
+      Metrics:
+        - Id: long
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-latency"}
+                - {Name: BurnRateWindowMinutes, Value: "4320"}
+            Period: 60
+            Stat: Maximum
+        - Id: short
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-api-latency"}
+                - {Name: BurnRateWindowMinutes, Value: "360"}
+            Period: 60
+            Stat: Maximum
+        - Id: both
+          ReturnData: true
+          Expression: MIN([long, short])
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  FreshnessFastBurnAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: FreshnessSlo
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-page-freshness-fast-burn
+      AlarmDescription: >-
+        PAGE. Data freshness is spending its 30-day error budget 14.4 times too fast (2% of the budget in an hour).
+        Runbook: docs/runbooks/data-freshness.md
+      Metrics:
+        - Id: long
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-data-freshness"}
+                - {Name: BurnRateWindowMinutes, Value: "60"}
+            Period: 60
+            Stat: Maximum
+        - Id: short
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-data-freshness"}
+                - {Name: BurnRateWindowMinutes, Value: "10"}
+            Period: 60
+            Stat: Maximum
+        - Id: both
+          ReturnData: true
+          Expression: MIN([long, short])
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 14.4
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  FreshnessSlowBurnAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: FreshnessSlo
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-page-freshness-slow-burn
+      AlarmDescription: >-
+        PAGE. Data freshness is spending its 30-day error budget 6 times too fast (5% of the budget in 6 hours).
+        Runbook: docs/runbooks/data-freshness.md
+      Metrics:
+        - Id: long
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-data-freshness"}
+                - {Name: BurnRateWindowMinutes, Value: "360"}
+            Period: 60
+            Stat: Maximum
+        - Id: short
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-data-freshness"}
+                - {Name: BurnRateWindowMinutes, Value: "30"}
+            Period: 60
+            Stat: Maximum
+        - Id: both
+          ReturnData: true
+          Expression: MIN([long, short])
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 6
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  FreshnessBudgetBurnAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: FreshnessSlo
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-ticket-freshness-budget-burn
+      AlarmDescription: >-
+        TICKET. Data freshness has spent its 30-day error budget at or above the sustainable rate for 3 days (10% of the budget).
+        Runbook: docs/runbooks/data-freshness.md
+      Metrics:
+        - Id: long
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-data-freshness"}
+                - {Name: BurnRateWindowMinutes, Value: "4320"}
+            Period: 60
+            Stat: Maximum
+        - Id: short
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/ApplicationSignals
+              MetricName: BurnRate
+              Dimensions:
+                - {Name: SloName, Value: !Sub "${StackPrefix}-data-freshness"}
+                - {Name: BurnRateWindowMinutes, Value: "360"}
+            Period: 60
+            Stat: Maximum
+        - Id: both
+          ReturnData: true
+          Expression: MIN([long, short])
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  CanaryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: canary
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactsBucket}/canary/*
+              - Effect: Allow
+                Action: s3:GetBucketLocation
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactsBucket}
+              # ListAllMyBuckets has no resource-level permissions; Synthetics calls it before writing artifacts.
+              - Effect: Allow
+                Action: s3:ListAllMyBuckets
+                Resource: "*"
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/cwsyn-${StackPrefix}-canary-*
+              # PutMetricData has no resource-level permissions; the condition pins the namespace.
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals: {cloudwatch:namespace: CloudWatchSynthetics}
+
+  Canary:
+    Type: AWS::Synthetics::Canary
+    Properties:
+      Name: !Sub ${StackPrefix}-canary
+      RuntimeVersion: !Ref CanaryRuntime
+      ExecutionRoleArn: !GetAtt CanaryRole.Arn
+      ArtifactS3Location: !Sub s3://${ArtifactsBucket}/canary
+      Schedule:
+        Expression: rate(5 minutes)
+      StartCanaryAfterCreation: true
+      SuccessRetentionPeriod: 2
+      FailureRetentionPeriod: 7
+      ProvisionedResourceCleanup: AUTOMATIC
+      # Declared here: the canary was missing the tag the stack propagates (drift.sh showed it).
+      Tags:
+        - {Key: Project, Value: !Ref StackPrefix}
+      RunConfig:
+        TimeoutInSeconds: 60
+        EnvironmentVariables:
+          HOST: !Ref DistributionDomainName
+      Code:
+        Handler: index.handler
+        Script: |
+          const synthetics = require('@aws/synthetics-puppeteer');
+          // Step names allow letters, numbers, hyphens, underscores, periods and spaces only.
+          const steps = { page: '/', health: '/health', significant: '/api/quakes/significant',
+            'daily-average': '/api/stats/daily-average', search: '/api/quakes/search' };
+          const expect200 = (path) => async (res) => new Promise((resolve, reject) => {
+            if (res.statusCode !== 200) return reject(new Error(`${path} returned ${res.statusCode}`));
+            res.on('data', () => {});
+            res.on('end', resolve);
+          });
+          exports.handler = async () => {
+            for (const [name, path] of Object.entries(steps)) {
+              await synthetics.executeHttpStep(name,
+                { hostname: process.env.HOST, method: 'GET', path, port: 443, protocol: 'https:' },
+                expect200(path));
+            }
+          };
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Condition: WantsBudget
+    Properties:
+      Budget:
+        BudgetName: !Sub ${StackPrefix}-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification: {NotificationType: ACTUAL, ComparisonOperator: GREATER_THAN, Threshold: 80, ThresholdType: PERCENTAGE}
+          Subscribers: [{SubscriptionType: EMAIL, Address: !Ref AlertEmail}]
+        - Notification: {NotificationType: FORECASTED, ComparisonOperator: GREATER_THAN, Threshold: 100, ThresholdType: PERCENTAGE}
+          Subscribers: [{SubscriptionType: EMAIL, Address: !Ref AlertEmail}]
+
+  CanaryFailingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-page-canary-failing
+      AlarmDescription: "PAGE. The synthetic check through CloudFront is failing or not running. Runbook: docs/runbooks/canary.md"
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - {Name: CanaryName, Value: !Ref Canary}
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  IngestErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-ticket-ingest-errors
+      AlarmDescription: "TICKET. The ingestion Lambda failed in each of the last 15 minutes. Runbook: docs/runbooks/data-freshness.md"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - {Name: FunctionName, Value: !Ref IngestFunctionName}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  ScheduleDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-ticket-schedule-dlq
+      AlarmDescription: "TICKET. EventBridge Scheduler could not deliver an ingestion run. Runbook: docs/runbooks/data-freshness.md"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - {Name: QueueName, Value: !Ref ScheduleDeadLetterQueueName}
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  UnhealthyTasksAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-ticket-unhealthy-tasks
+      AlarmDescription: "TICKET. At least one API task has failed ALB health checks for 5 minutes. Runbook: docs/runbooks/api-availability.md"
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - {Name: LoadBalancer, Value: !Ref AlbFullName}
+        - {Name: TargetGroup, Value: !Ref TargetGroupFullName}
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  DbCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-ticket-db-cpu
+      AlarmDescription: "TICKET. Database CPU above 80% for 15 minutes. Runbook: docs/runbooks/database.md"
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - {Name: DBInstanceIdentifier, Value: !Ref DbInstanceId}
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  DbStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-ticket-db-storage
+      AlarmDescription: "TICKET. Database free storage below 2 GiB. Runbook: docs/runbooks/database.md"
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - {Name: DBInstanceIdentifier, Value: !Ref DbInstanceId}
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 2147483648
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  DbMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${StackPrefix}-ticket-db-memory
+      AlarmDescription: "TICKET. Database freeable memory below 100 MiB for 15 minutes. Runbook: docs/runbooks/database.md"
+      Namespace: AWS/RDS
+      MetricName: FreeableMemory
+      Dimensions:
+        - {Name: DBInstanceIdentifier, Value: !Ref DbInstanceId}
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 104857600
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Ref StackPrefix
+      DashboardBody: !Sub |
+        {"widgets": [
+          {"type": "metric", "x": 0, "y": 0, "width": 8, "height": 6, "properties": {"title": "SLO attainment (%)", "region": "${AWS::Region}", "stat": "Minimum", "period": 300, "view": "timeSeries", "metrics": [["AWS/ApplicationSignals", "AttainmentRate", "SloName", "${StackPrefix}-api-availability"], ["AWS/ApplicationSignals", "AttainmentRate", "SloName", "${StackPrefix}-api-latency"], ["AWS/ApplicationSignals", "AttainmentRate", "SloName", "${StackPrefix}-data-freshness"]]}},
+          {"type": "metric", "x": 8, "y": 0, "width": 8, "height": 6, "properties": {"title": "Burn rate, 60-minute window", "region": "${AWS::Region}", "stat": "Maximum", "period": 60, "view": "timeSeries", "metrics": [["AWS/ApplicationSignals", "BurnRate", "SloName", "${StackPrefix}-api-availability", "BurnRateWindowMinutes", "60"], ["AWS/ApplicationSignals", "BurnRate", "SloName", "${StackPrefix}-api-latency", "BurnRateWindowMinutes", "60"], ["AWS/ApplicationSignals", "BurnRate", "SloName", "${StackPrefix}-data-freshness", "BurnRateWindowMinutes", "60"]]}},
+          {"type": "metric", "x": 16, "y": 0, "width": 8, "height": 6, "properties": {"title": "Canary success (%)", "region": "${AWS::Region}", "stat": "Average", "period": 300, "view": "timeSeries", "metrics": [["CloudWatchSynthetics", "SuccessPercent", "CanaryName", "${StackPrefix}-canary"]]}},
+          {"type": "metric", "x": 0, "y": 6, "width": 8, "height": 6, "properties": {"title": "Requests and 5xx", "region": "${AWS::Region}", "stat": "Sum", "period": 60, "view": "timeSeries", "metrics": [["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${AlbFullName}"], ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${AlbFullName}"], ["AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${AlbFullName}"]]}},
+          {"type": "metric", "x": 8, "y": 6, "width": 8, "height": 6, "properties": {"title": "Target response time (s)", "region": "${AWS::Region}", "stat": "p95", "period": 60, "view": "timeSeries", "metrics": [["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${AlbFullName}", {"stat": "p50"}], ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${AlbFullName}", {"stat": "p95"}], ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${AlbFullName}", {"stat": "p99"}]]}},
+          {"type": "metric", "x": 16, "y": 6, "width": 8, "height": 6, "properties": {"title": "WAF blocked requests per rule", "region": "${AWS::Region}", "stat": "Sum", "period": 60, "view": "timeSeries", "metrics": [["AWS/WAFV2", "BlockedRequests", "WebACL", "${StackPrefix}-alb", "Region", "${AWS::Region}", "Rule", "rate-limit-per-viewer"], ["AWS/WAFV2", "BlockedRequests", "WebACL", "${StackPrefix}-alb", "Region", "${AWS::Region}", "Rule", "aws-common"], ["AWS/WAFV2", "BlockedRequests", "WebACL", "${StackPrefix}-alb", "Region", "${AWS::Region}", "Rule", "aws-known-bad-inputs"]]}},
+          {"type": "metric", "x": 0, "y": 12, "width": 8, "height": 6, "properties": {"title": "Data lag (s)", "region": "${AWS::Region}", "stat": "Maximum", "period": 300, "view": "timeSeries", "metrics": [["${StackPrefix}/Ingest", "DataLagSeconds", "Service", "ingest"]]}},
+          {"type": "metric", "x": 8, "y": 12, "width": 8, "height": 6, "properties": {"title": "Ingestion runs", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries", "metrics": [["${StackPrefix}/Ingest", "IngestSuccess", "Service", "ingest", {"stat": "Minimum"}], ["${StackPrefix}/Ingest", "EventsUpserted", "Service", "ingest"], ["${StackPrefix}/Ingest", "EventsSkipped", "Service", "ingest"]]}},
+          {"type": "metric", "x": 16, "y": 12, "width": 8, "height": 6, "properties": {"title": "Ingest Lambda and DLQ", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries", "metrics": [["AWS/Lambda", "Errors", "FunctionName", "${IngestFunctionName}"], ["AWS/Lambda", "Duration", "FunctionName", "${IngestFunctionName}", {"stat": "p95"}], ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${ScheduleDeadLetterQueueName}", {"stat": "Maximum"}]]}},
+          {"type": "metric", "x": 0, "y": 18, "width": 8, "height": 6, "properties": {"title": "ECS service (%)", "region": "${AWS::Region}", "stat": "Average", "period": 60, "view": "timeSeries", "metrics": [["AWS/ECS", "CPUUtilization", "ClusterName", "${ClusterName}", "ServiceName", "${ServiceName}"], ["AWS/ECS", "MemoryUtilization", "ClusterName", "${ClusterName}", "ServiceName", "${ServiceName}"]]}},
+          {"type": "metric", "x": 8, "y": 18, "width": 8, "height": 6, "properties": {"title": "Healthy tasks", "region": "${AWS::Region}", "stat": "Minimum", "period": 60, "view": "timeSeries", "metrics": [["AWS/ApplicationELB", "HealthyHostCount", "LoadBalancer", "${AlbFullName}", "TargetGroup", "${TargetGroupFullName}"]]}},
+          {"type": "metric", "x": 16, "y": 18, "width": 8, "height": 6, "properties": {"title": "Database", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries", "metrics": [["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${DbInstanceId}", {"stat": "Average"}], ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${DbInstanceId}", {"stat": "Maximum"}], ["AWS/RDS", "FreeableMemory", "DBInstanceIdentifier", "${DbInstanceId}", {"stat": "Minimum", "yAxis": "right"}], ["AWS/RDS", "FreeStorageSpace", "DBInstanceIdentifier", "${DbInstanceId}", {"stat": "Minimum", "yAxis": "right"}]]}},
+          {"type": "alarm", "x": 0, "y": 24, "width": 24, "height": 6, "properties": {"title": "Alarms", "alarms": ["${CanaryFailingAlarm.Arn}", "${AvailabilityFastBurnAlarm.Arn}", "${AvailabilitySlowBurnAlarm.Arn}", "${AvailabilityBudgetBurnAlarm.Arn}", "${LatencyFastBurnAlarm.Arn}", "${LatencySlowBurnAlarm.Arn}", "${LatencyBudgetBurnAlarm.Arn}", "${FreshnessFastBurnAlarm.Arn}", "${FreshnessSlowBurnAlarm.Arn}", "${FreshnessBudgetBurnAlarm.Arn}", "${IngestErrorsAlarm.Arn}", "${ScheduleDlqAlarm.Arn}", "${UnhealthyTasksAlarm.Arn}", "${DbCpuAlarm.Arn}", "${DbStorageAlarm.Arn}", "${DbMemoryAlarm.Arn}"]}}
+        ]}
+
+Outputs:
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+  SloNames:
+    Value: !Sub ${StackPrefix}-api-availability,${StackPrefix}-api-latency,${StackPrefix}-data-freshness
+  CanaryName:
+    Value: !Ref Canary
+  DashboardName:
+    Value: !Ref Dashboard

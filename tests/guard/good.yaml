@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  OpenBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  PublicDb:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      StorageEncrypted: true
+      PubliclyAccessible: false
+  OpenSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: from app only
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: sg-0123456789abcdef0
+  AdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {}
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: [logs:PutLogEvents]
+                Resource: arn:aws:logs:us-east-2:111122223333:log-group:/app:*
+  BareRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: {}
+  ForeverLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 7
+  PublicFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.14
+      VpcConfig:
+        SubnetIds: [subnet-0123456789abcdef0]
+        SecurityGroupIds: [sg-0123456789abcdef0]
+  StarManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: logs:PutLogEvents
+            Resource: arn:aws:logs:us-east-2:111122223333:log-group:/app:*
+  PlainSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: no ingress
+  OpenIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: sg-0123456789abcdef0
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: sg-0123456789abcdef1

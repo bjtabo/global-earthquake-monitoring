@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+pythonpath = ["app", "app/ingest", "app/migrate", "app/api"]
+testpaths = ["tests"]
+markers = ["e2e: runs against a deployed stack, needs BASE_URL"]
+addopts = "-m 'not e2e'"
